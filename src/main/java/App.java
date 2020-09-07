@@ -54,7 +54,11 @@ public class App {
    */
   public static void main(String[] args) throws Exception {
     Generator.GeneratorOptions options = new Generator.GeneratorOptions();
-    
+
+    //Default seed
+    options.seed = 2020;
+    options.population = 30;
+
     boolean validArgs = true;
     if (args != null && args.length > 0) {
       try {

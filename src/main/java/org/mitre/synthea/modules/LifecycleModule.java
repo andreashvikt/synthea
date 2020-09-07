@@ -20,6 +20,7 @@ import org.mitre.synthea.helpers.SimpleCSV;
 import org.mitre.synthea.helpers.SimpleYML;
 import org.mitre.synthea.helpers.TrendingValueGenerator;
 import org.mitre.synthea.helpers.Utilities;
+import org.mitre.synthea.helpers.tenor.TenorData;
 import org.mitre.synthea.modules.BloodPressureValueGenerator.SysDias;
 import org.mitre.synthea.world.agents.Person;
 import org.mitre.synthea.world.concepts.BMI;
@@ -230,6 +231,122 @@ public final class LifecycleModule extends Module {
 
     double adherenceBaseline = Double
         .parseDouble(Config.get("lifecycle.adherence.baseline", ".05"));
+    person.attributes.put(ADHERENCE_PROBABILITY, adherenceBaseline);
+
+    grow(person, time); // set initial height and weight from percentiles
+    calculateVitalSigns(person, time);  // Set initial values for many vital signs.
+
+    String orientation = sexualOrientationData.next(person);
+    attributes.put(Person.SEXUAL_ORIENTATION, orientation);
+
+    // Setup vital signs which follow the generator approach
+    setupVitalSignGenerators(person);
+  }
+
+  /**
+   * For unto us a child is born.
+   * @param person The baby.
+   * @param time The time of birth.
+   */
+  public static void birthBasedOnTenor(Person person, long time, TenorData tenorData) {
+    Map<String, Object> attributes = person.attributes;
+
+    attributes.put(Person.ID, person.randUUID().toString());
+    attributes.put(Person.BIRTHDATE, time);
+    String gender = (String) attributes.get(Person.GENDER);
+    String language = (String) attributes.get(Person.FIRST_LANGUAGE);
+    String firstName = tenorData.firstName;
+    String lastName = tenorData.lastName;
+
+    attributes.put(Person.FIRST_NAME, firstName);
+    attributes.put(Person.LAST_NAME, lastName);
+    attributes.put(Person.NAME, firstName + " " + lastName);
+
+    //TODO explore if it is possible to get the mothers name from tenor - if not, generate more norwegian names
+    String motherFirstName = fakeFirstName("F", language, person);
+    String motherLastName = fakeLastName(language, person);
+    if (appendNumbersToNames) {
+      motherFirstName = addHash(motherFirstName);
+      motherLastName = addHash(motherLastName);
+    }
+    attributes.put(Person.NAME_MOTHER, motherFirstName + " " + motherLastName);
+
+    //TODO explore if it is possible to get the fathers name from tenor - if not, generate more norwegian names
+    String fatherFirstName = fakeFirstName("M", language, person);
+    if (appendNumbersToNames) {
+      fatherFirstName = addHash(fatherFirstName);
+    }
+    // this is anglocentric where the baby gets the father's last name
+    attributes.put(Person.NAME_FATHER, fatherFirstName + " " + lastName);
+
+    double prevalenceOfTwins =
+            (double) BiometricsConfig.get("lifecycle.prevalence_of_twins", 0.02);
+    if ((person.rand() < prevalenceOfTwins)) {
+      attributes.put(Person.MULTIPLE_BIRTH_STATUS, person.randInt(3) + 1);
+    }
+
+    String phoneNumber = "555-" + ((person.randInt(999 - 100 + 1) + 100)) + "-"
+            + ((person.randInt(9999 - 1000 + 1) + 1000));
+    attributes.put(Person.TELECOM, phoneNumber);
+
+    String ssn = tenorData.idnummer;
+    attributes.put(Person.IDENTIFIER_SSN, ssn);
+
+    String city = (String) attributes.get(Person.CITY);
+    Location location = (Location) attributes.get(Person.LOCATION);
+    if (location != null) {
+      // should never happen in practice, but can happen in unit tests
+      location.assignPoint(person, city);
+      person.attributes.put(Person.ZIP, location.getZipCode(city, person));
+      String[] birthPlace;
+      if ("english".equalsIgnoreCase((String) attributes.get(Person.FIRST_LANGUAGE))) {
+        birthPlace = location.randomBirthPlace(person);
+      } else {
+        birthPlace = location.randomBirthplaceByLanguage(
+                person, (String) person.attributes.get(Person.FIRST_LANGUAGE));
+      }
+      attributes.put(Person.BIRTH_CITY, birthPlace[0]);
+      attributes.put(Person.BIRTH_STATE, birthPlace[1]);
+      attributes.put(Person.BIRTH_COUNTRY, birthPlace[2]);
+      // For CSV exports so we don't break any existing schemas
+      attributes.put(Person.BIRTHPLACE, birthPlace[3]);
+    }
+
+    boolean hasStreetAddress2 = person.rand() < 0.5;
+    attributes.put(Person.ADDRESS, fakeAddress(hasStreetAddress2, person));
+
+    attributes.put(Person.ACTIVE_WEIGHT_MANAGEMENT, false);
+    // TODO: Why are the percentiles a vital sign? Sounds more like an attribute?
+    double heightPercentile = person.rand();
+    PediatricGrowthTrajectory pgt = new PediatricGrowthTrajectory(person.seed, time);
+    double weightPercentile = pgt.reverseWeightPercentile(gender, heightPercentile);
+    person.setVitalSign(VitalSign.HEIGHT_PERCENTILE, heightPercentile);
+    person.setVitalSign(VitalSign.WEIGHT_PERCENTILE, weightPercentile);
+    person.attributes.put(Person.GROWTH_TRAJECTORY, pgt);
+
+    // Temporarily generate a mother
+    Person mother = new Person(person.randLong());
+    mother.attributes.put(Person.GENDER, "F");
+    mother.attributes.put("pregnant", true);
+    mother.attributes.put(Person.RACE, person.attributes.get(Person.RACE));
+    mother.attributes.put(Person.ETHNICITY, person.attributes.get(Person.ETHNICITY));
+    mother.attributes.put(BirthStatistics.BIRTH_SEX, person.attributes.get(Person.GENDER));
+    BirthStatistics.setBirthStatistics(mother, time);
+
+    person.setVitalSign(VitalSign.HEIGHT,
+            (double) mother.attributes.get(BirthStatistics.BIRTH_HEIGHT)); // cm
+    person.setVitalSign(VitalSign.WEIGHT,
+            (double) mother.attributes.get(BirthStatistics.BIRTH_WEIGHT)); // kg
+    person.setVitalSign(VitalSign.HEAD, childHeadCircumference(person, time)); // cm
+
+    attributes.put(AGE, 0);
+    attributes.put(AGE_MONTHS, 0);
+
+    boolean isRHNeg = person.rand() < 0.15;
+    attributes.put("RH_NEG", isRHNeg);
+
+    double adherenceBaseline = Double
+            .parseDouble(Config.get("lifecycle.adherence.baseline", ".05"));
     person.attributes.put(ADHERENCE_PROBABILITY, adherenceBaseline);
 
     grow(person, time); // set initial height and weight from percentiles

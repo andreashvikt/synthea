@@ -674,12 +674,14 @@ public abstract class Exporter {
    * @return The filename only (not a path).
    */
   public static String filename(Person person, String tag, String extension) {
-    if (Boolean.parseBoolean(Config.get("exporter.use_uuid_filenames"))) {
+    /* if (Boolean.parseBoolean(Config.get("exporter.use_uuid_filenames"))) {
       return person.attributes.get(Person.ID) + tag + "." + extension;
     } else {
       // ensure unique filenames for now
       return person.attributes.get(Person.NAME).toString().replace(' ', '_') + "_"
           + person.attributes.get(Person.ID) + tag + "." + extension;
-    }
+    }*/
+    String prefix = person.attributes.get(Person.IDENTIFIER_SSN).toString() + ".syntheadata." + extension;
+    return prefix;
   }
 }

@@ -1,0 +1,30 @@
+package org.mitre.synthea.helpers.tenorpojos;
+
+import com.google.gson.annotations.Expose;
+import com.google.gson.annotations.SerializedName;
+
+public class Navn {
+
+    @SerializedName("erGjeldende")
+    @Expose
+    public Boolean erGjeldende;
+    @SerializedName("kilde")
+    @Expose
+    public String kilde;
+    @SerializedName("aarsak")
+    @Expose
+    public String aarsak;
+    @SerializedName("gyldighetstidspunkt")
+    @Expose
+    public String gyldighetstidspunkt;
+    @SerializedName("fornavn")
+    @Expose
+    public String fornavn;
+    @SerializedName("etternavn")
+    @Expose
+    public String etternavn;
+    @SerializedName("forkortetNavn")
+    @Expose
+    public String forkortetNavn;
+
+}

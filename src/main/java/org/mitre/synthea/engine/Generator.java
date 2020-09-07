@@ -6,6 +6,8 @@ import java.io.FileOutputStream;
 import java.io.FilenameFilter;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -31,6 +33,8 @@ import org.mitre.synthea.helpers.Config;
 import org.mitre.synthea.helpers.RandomNumberGenerator;
 import org.mitre.synthea.helpers.TransitionMetrics;
 import org.mitre.synthea.helpers.Utilities;
+import org.mitre.synthea.helpers.tenor.TenorData;
+import org.mitre.synthea.helpers.tenor.TenorParser;
 import org.mitre.synthea.modules.DeathModule;
 import org.mitre.synthea.modules.EncounterModule;
 import org.mitre.synthea.modules.HealthInsuranceModule;
@@ -310,10 +314,13 @@ public class Generator implements RandomNumberGenerator {
         }
       }
     } else {
+      File[] tenorPaths = TenorParser.getFileList();
+      int minValue = Math.min(this.options.population, tenorPaths.length);
       for (int i = 0; i < this.options.population; i++) {
         final int index = i;
         final long seed = this.random.nextLong();
-        threadPool.submit(() -> generatePerson(index, seed));
+        //threadPool.submit(() -> generatePerson(index, seed));
+        threadPool.submit(() -> generatePersonBasedOnTenor(index, seed, tenorPaths[index].getAbsolutePath()));
       }
     }
 
@@ -455,6 +462,93 @@ public class Generator implements RandomNumberGenerator {
     }
     return person;
   }
+
+  /**
+   * Generate a random Person, from the given tenor-file and seed. The returned person will be alive at the end of
+   * the simulation. This means that if in the course of the simulation the person dies, a new
+   * person will be started to replace them. Note also that if the person dies, the seed to produce
+   * them can't be re-used (otherwise the new person would die as well) so a new seed is picked,
+   * based on the given seed.
+   *
+   * @param index
+   *          Target index in the whole set of people to generate
+   * @param personSeed
+   *          Seed for the random person
+   * @param filePath
+   *          Filepath to the tenor file the person is based on
+   * @return generated Person
+   */
+  public Person generatePersonBasedOnTenor(int index, long personSeed, String filePath) {
+    Person person = null;
+    try {
+      boolean isAlive = true;
+      int tryNumber = 0; // number of tries to create these demographics
+      TenorData tenorData = TenorParser.parseFile(filePath);
+      Random randomForDemographics = new Random(personSeed);
+      Map<String, Object> demoAttributes = randomDemographicsBasedOnTenor(randomForDemographics, tenorData);
+
+      do {
+        person = createPersonBasedOnTenor(personSeed, demoAttributes, tenorData);
+        long finishTime = person.lastUpdated + timestep;
+
+        isAlive = person.alive(finishTime);
+
+        if (isAlive && onlyDeadPatients) {
+          // rotate the seed so the next attempt gets a consistent but different one
+          personSeed = randomForDemographics.nextLong();
+          continue;
+          // skip the other stuff if the patient is alive and we only want dead patients
+          // note that this skips ahead to the while check and doesn't automatically re-loop
+        }
+
+        if (!isAlive && onlyAlivePatients) {
+          // rotate the seed so the next attempt gets a consistent but different one
+          personSeed = randomForDemographics.nextLong();
+          continue;
+          // skip the other stuff if the patient is dead and we only want alive patients
+          // note that this skips ahead to the while check and doesn't automatically re-loop
+        }
+
+        recordPerson(person, index);
+
+        tryNumber++;
+        if (!isAlive) {
+          // rotate the seed so the next attempt gets a consistent but different one
+          personSeed = randomForDemographics.nextLong();
+
+          // if we've tried and failed > 10 times to generate someone over age 90
+          // and the options allow for ages as low as 85
+          // reduce the age to increase the likelihood of success
+          if (tryNumber > 10 && (int)person.attributes.get(TARGET_AGE) > 90
+                  && (!options.ageSpecified || options.minAge <= 85)) {
+            // pick a new target age between 85 and 90
+            int newTargetAge = randomForDemographics.nextInt(5) + 85;
+            // the final age bracket is 85-110, but our patients rarely break 100
+            // so reducing a target age to 85-90 shouldn't affect numbers too much
+            demoAttributes.put(TARGET_AGE, newTargetAge);
+            long birthdate = birthdateFromTargetAge(newTargetAge, randomForDemographics);
+            demoAttributes.put(Person.BIRTHDATE, birthdate);
+          }
+        }
+
+        // TODO - export is DESTRUCTIVE when it filters out data
+        // this means export must be the LAST THING done with the person
+        Exporter.export(person, finishTime, exporterRuntimeOptions);
+      } while ((!isAlive && !onlyDeadPatients && this.options.overflow)
+              || (isAlive && onlyDeadPatients));
+      // if the patient is alive and we want only dead ones => loop & try again
+      //  (and dont even export, see above)
+      // if the patient is dead and we only want dead ones => done
+      // if the patient is dead and we want live ones => loop & try again
+      //  (but do export the record anyway)
+      // if the patient is alive and we want live ones => done
+    } catch (Throwable e) {
+      // lots of fhir things throw errors for some reason
+      e.printStackTrace();
+      throw e;
+    }
+    return person;
+  }
   
   /**
    * Update person record to stop time, record the entry and export record.
@@ -519,6 +613,29 @@ public class Generator implements RandomNumberGenerator {
     
     return person;
   }
+
+  /**
+   * Create a new person and update them until until Generator.stop or
+   * they die, whichever comes sooner.
+   * @param personSeed Seed for the random person
+   * @param demoAttributes Demographic attributes for the new person, {@link #randomDemographics}
+   * @param tenorData Personal information like name, date of birth etc. based on tenor file
+   * @return the new person
+   */
+  public Person createPersonBasedOnTenor(long personSeed, Map<String, Object> demoAttributes, TenorData tenorData) {
+    Person person = new Person(personSeed);
+    person.populationSeed = this.options.seed;
+    person.attributes.putAll(demoAttributes);
+    person.attributes.put(Person.LOCATION, location);
+    person.lastUpdated = (long) demoAttributes.get(Person.BIRTHDATE);
+
+    LifecycleModule.birthBasedOnTenor(person, person.lastUpdated, tenorData);
+    person.currentModules = Module.getModules(modulePredicate);
+
+    updatePerson(person);
+
+    return person;
+  }
   
   /**
    * Create a set of random demographics.
@@ -528,6 +645,18 @@ public class Generator implements RandomNumberGenerator {
   public Map<String, Object> randomDemographics(Random random) {
     Demographics city = location.randomCity(random);
     Map<String, Object> demoAttributes = pickDemographics(random, city);
+    return demoAttributes;
+  }
+
+  /**
+   * Create a set of random demographics.
+   * @param random The random number generator to use.
+   * @param tenorData Personal information like name, date of birth etc. based on tenor file
+   * @return demographics
+   */
+  public Map<String, Object> randomDemographicsBasedOnTenor(Random random, TenorData tenorData) {
+    Demographics city = location.randomCity(random);
+    Map<String, Object> demoAttributes = pickDemographicsBasedOnTenor(random, city, tenorData);
     return demoAttributes;
   }
   
@@ -651,6 +780,62 @@ public class Generator implements RandomNumberGenerator {
     long birthdate = birthdateFromTargetAge(targetAge, random);
     out.put(Person.BIRTHDATE, birthdate);
     
+    return out;
+  }
+
+  private Map<String, Object> pickDemographicsBasedOnTenor(Random random, Demographics city, TenorData tenorData) {
+    Map<String, Object> out = new HashMap<>();
+    out.put(Person.CITY, city.city);
+    out.put(Person.STATE, city.state);
+    out.put("county", city.county);
+
+    String race = city.pickRace(random);
+    out.put(Person.RACE, race);
+    String ethnicity = city.pickEthnicity(random);
+    out.put(Person.ETHNICITY, ethnicity);
+    String language = city.languageFromRaceAndEthnicity(race, ethnicity, random);
+    out.put(Person.FIRST_LANGUAGE, language);
+
+    String gender;
+    if(tenorData.gender.equalsIgnoreCase("mann")){
+      gender = "M";
+    } else {
+      gender = "F";
+    }
+    out.put(Person.GENDER, gender);
+
+    // Socioeconomic variables of education, income, and education are set.
+    String education = city.pickEducation(random);
+    out.put(Person.EDUCATION, education);
+    double educationLevel = city.educationLevel(education, random);
+    out.put(Person.EDUCATION_LEVEL, educationLevel);
+
+    int income = city.pickIncome(random);
+    out.put(Person.INCOME, income);
+    double incomeLevel = city.incomeLevel(income);
+    out.put(Person.INCOME_LEVEL, incomeLevel);
+
+    double occupation = random.nextDouble();
+    out.put(Person.OCCUPATION_LEVEL, occupation);
+
+    double sesScore = city.socioeconomicScore(incomeLevel, educationLevel, occupation);
+    out.put(Person.SOCIOECONOMIC_SCORE, sesScore);
+    out.put(Person.SOCIOECONOMIC_CATEGORY, city.socioeconomicCategory(sesScore));
+
+    if (this.onlyVeterans) {
+      out.put("veteran_population_override", Boolean.TRUE);
+    }
+
+    String synteticBirthDateString = tenorData.birthDate;
+    SimpleDateFormat formatter = new SimpleDateFormat("yyyy-MM-dd");
+    long synteticBirthDate = 0;
+    try{
+      synteticBirthDate = formatter.parse(synteticBirthDateString).getTime();
+    }catch (ParseException e){
+      e.printStackTrace();
+    }
+    out.put(Person.BIRTHDATE, synteticBirthDate);
+
     return out;
   }
   
